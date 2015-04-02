@@ -22,7 +22,7 @@ public class SimpleDhtActivity extends Activity {
                 new OnTestClickListener(tv, getContentResolver()));
 
         /* Build URI */
-	    uri = SimpleDhtProvider.buildUri(SimpleDhtProvider.URI_SCHEME, SimpleDhtProvider.URI);
+	    uri = SimpleDhtProvider.buildUri(SimpleDhtProvider.URI_SCHEME, SimpleDhtProvider.URI_AUTHORITY);
 
     }
 
