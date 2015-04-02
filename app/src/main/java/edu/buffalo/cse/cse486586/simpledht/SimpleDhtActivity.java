@@ -24,7 +24,6 @@ public class SimpleDhtActivity extends Activity {
         /* Build URI */
 	    uri = SimpleDhtProvider.buildUri(SimpleDhtProvider.URI_SCHEME, SimpleDhtProvider.URI);
 
-
     }
 
     @Override
