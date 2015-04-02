@@ -4,6 +4,7 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
@@ -12,7 +13,6 @@ import android.util.Log;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -22,8 +22,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Formatter;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.TreeMap;
@@ -44,14 +46,15 @@ public class SimpleDhtProvider extends ContentProvider {
 
 	/* Important stuff */
 	TreeMap<String, Integer> nodeInformation = new TreeMap<>();
-	int predecessorId = 0, successorId = 0;
-	boolean is5554Alive = false;
+	static int predecessorId = 0, successorId = 0;
+	static boolean is5554Alive = false;
+
+	List<String> keysInserted = new ArrayList<>();
 
 	@Override
 	public boolean onCreate() {
 
-		/* TODO:
-			1. Get own port ID
+		/* 	1. Get own port ID
 			2. If I am 5554
 				a. Declare self as predecessor and successor
 				a. Create a parallel AsyncTask that:
@@ -64,7 +67,7 @@ public class SimpleDhtProvider extends ContentProvider {
 				b. Wait for a response
 					c. If 5554 is alive - receive predecessor & successor (and set them)
 					d. If 5554 is NOT alive (TIMEOUT) - declare self as predecessor & successor
-		 */
+		*/
 
 		context = getContext();
 
@@ -111,16 +114,34 @@ public class SimpleDhtProvider extends ContentProvider {
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
 	    /* Only need to use the first two parameters, uri & selection */
 
-
-		if (selection.equals("\\”*\\””")) {
+		if (selection.equals("\"*\"")) {
 		    /* TODO: If “*” is given as the selection parameter to delete(),
-	       then you need to delete all <key, value> pairs stored in your entire DHT. */
+		   then you need to delete all <key, value> pairs stored in your entire DHT. */
 
-		} else if (selection.equals("\\”@\\””")) {
-	        /* TODO: Handle case for "@" */
+		} else if (selection.equals("\"@\"")) {
+		    /* Delete all files on the local partition */
+
+			for (String key : keysInserted)
+				/* TODO: Check if this works */
+				context.deleteFile(key);
+			keysInserted.clear();
+
 		} else {
-			/* TODO: Normal key */
-			String key = selection;
+			/* Normal case. 'selection' is the key */
+
+			/* Does it belong here? */
+			String hashedKey = genHash(selection);
+			boolean belongsHere = doesItBelongHere(hashedKey);
+
+			if (belongsHere) {
+				/* --- The key is on THIS partition */
+
+				/* TODO: Check if this works */
+				context.deleteFile(selection);
+				keysInserted.remove(selection);
+			} else {
+				/* TODO: The key is NOT on this partition. Send to successor */
+			}
 		}
 
 		return 0;
@@ -130,26 +151,74 @@ public class SimpleDhtProvider extends ContentProvider {
 	public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs,
 	                    String sortOrder) {
 
+		/* Make the cursor */
+		String[] columnNames = {"key", "value"};
+		MatrixCursor matrixCursor = new MatrixCursor(columnNames);
 
-		if (selection.equals("\\”*\\””")) {
+		if (selection.equals("\"*\"")) {
 			/* TODO: Handle case for "*" */
-		} else if (selection.equals("\\”@\\””")) {
-	        /* TODO: Handle case for "@" */
+
+			/* FOR NOW: Return all key-value pairs on this local partition */
+			for (String key : keysInserted) {
+				addRowToCursor(key, matrixCursor);
+			}
+
+		} else if (selection.equals("\"@\"")) {
+		    /* TODO: Handle case for "@" */
+
+			/* FOR NOW: Return all key-value pairs on this local partition */
+			for (String key : keysInserted) {
+				addRowToCursor(key, matrixCursor);
+			}
+
+			Log.v(TAG, "Query for '@'. No. of rows retrieved ==> " + matrixCursor.getCount());
 		} else {
-			/* TODO: Normal key */
-			String key = selection;
+			/* ---- Normal key ("selection" is the key) */
+			String hashedKey = genHash(selection);
+
+			/* Does it belong here? */
+			boolean belongsHere = doesItBelongHere(hashedKey);
+
+			if (belongsHere) {
+				/* The key-value pair is here. Read it into the cursor */
+				addRowToCursor(selection, matrixCursor);
+			} else {
+				/* TODO: The value belongs somewhere else. Ask the successor if it has it */
+
+			}
+
+			Log.v(TAG, "Query for '" + selection + "'. No. of rows retrieved ==> " + matrixCursor.getCount());
+		}
+
+		return matrixCursor;
+	}
+
+	@Override
+	public Uri insert(Uri uri, ContentValues values) {
+
+		String msgKey = (String) values.get("key");
+		String msgValue = (String) values.get("value");
+		String hashedKey = genHash(msgKey);
+
+		/* Does it belong here? */
+		boolean belongsHere = doesItBelongHere(hashedKey);
+
+		if (belongsHere) {
+			/* Since it belongs here, write the content values to internal storage */
+			writeToInternalStorage(msgKey, msgValue);
+			keysInserted.add(msgKey);
+		} else {
+
+			/* TODO: Doesn't belong here. Pass it on until it reaches the right place. */
 		}
 
 		return null;
 	}
 
-
-	@Override
-	public Uri insert(Uri uri, ContentValues values) {
-
+	private boolean doesItBelongHere(String hashedKey) {
 	    /*
 	        TODO:
-	          1. if key <= me
+	          1. if key <= my-key
 	                a. if key is > predecessor
 	                    i. if my-key is < successor --> it belongs here
 	                    ii. else --> send to successor
@@ -159,22 +228,23 @@ public class SimpleDhtProvider extends ContentProvider {
 	                b. else --> send to successor
 	     */
 
-		String msgKey = (String) values.get("key");
-		String msgValue = (String) values.get("value");
+		boolean belongsHere = false;
+		String predecessorHashedId = genHash(predecessorId);
+		String successorHashedId = genHash(successorId);
 
-		String key = genHash(msgKey);
+		if (hashedKey.compareTo(myHashedId) <= 0) {
+			if (hashedKey.compareTo(predecessorHashedId) > 0)
+				if (myHashedId.compareTo(successorHashedId) < 0)
+					belongsHere = true;
+		} else if (myHashedId.compareTo(predecessorHashedId) < 0 && predecessorHashedId.compareTo(hashedKey) < 0)
+			belongsHere = true;
 
-
-	    /* TODO: Write only if this key-value pair belongs here, otherwise send it to...successor? */
-		// writeToInternalStorage
-
-		return null;
+		return belongsHere;
 	}
 
 
 	@Override
 	public int update(Uri uri, ContentValues values, String selection, String[] selectionArgs) {
-		// TODO Auto-generated method stub
 		return 0;
 	}
 
@@ -183,20 +253,23 @@ public class SimpleDhtProvider extends ContentProvider {
 		return null;
 	}
 
+	private String genHash(int input) {
+		return genHash(String.valueOf(input));
+	}
+
 	private String genHash(String input) {
-		MessageDigest sha1 = null;
-		byte[] sha1Hash = null;
+		MessageDigest sha1;
+		Formatter formatter = new Formatter();
+		byte[] sha1Hash;
+
 		try {
 			sha1 = MessageDigest.getInstance("SHA-1");
 			sha1Hash = sha1.digest(input.getBytes());
-		} catch (NoSuchAlgorithmException e) {
-			e.printStackTrace();
-		} catch (NullPointerException e) {
-			e.printStackTrace();
-		}
-		Formatter formatter = new Formatter();
-		for (byte b : sha1Hash) {
-			formatter.format("%02x", b);
+			for (byte b : sha1Hash) {
+				formatter.format("%02x", b);
+			}
+		} catch (Exception e) {
+			Log.e("ERROR " + TAG, Log.getStackTraceString(e));
 		}
 		return formatter.toString();
 	}
@@ -255,9 +328,11 @@ public class SimpleDhtProvider extends ContentProvider {
 					BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
 					String incomingString = bufferedReader.readLine();
 
-					String incoming[] = incomingString.split("$$");
+					Log.d(TAG, "incoming ==> " + incomingString);
+					String incoming[] = incomingString.split("##");
 					Mode mode = Mode.valueOf(incoming[0]);
 					String sendersActualID = incoming[1];
+					String messageText = incoming[2];
 
 					switch (mode) {
 						case JOIN_REQUEST:
@@ -271,13 +346,15 @@ public class SimpleDhtProvider extends ContentProvider {
 							break;
 
 						case JOIN_RESPONSE:
-							/* --- Got a response from 5554 for the join request I had sent */
+							/* --- Got a response from 5554 for the join request I (OR SOMEONE ELSE) had sent */
 							is5554Alive = true;
 
-							/* TODO ================================================== */
-							
-					}
+							String[] parts = messageText.split("%%");
+							predecessorId = Integer.parseInt(parts[0]);
+							successorId = Integer.parseInt(parts[1]);
+							break;
 
+					}
 				}
 			} catch (IOException e) {
 				Log.e("ERROR " + TAG, Log.getStackTraceString(e));
@@ -285,8 +362,6 @@ public class SimpleDhtProvider extends ContentProvider {
 
 			return null;
 		}
-
-
 	}
 
 	private class ClientTask extends AsyncTask<Object, Void, Void> {
@@ -301,11 +376,11 @@ public class SimpleDhtProvider extends ContentProvider {
 			switch (mode) {
 
 				case SEND_JOIN_REQUEST:
-					/* Send join request */
+					/* Send join request to 5554 */
 					try {
 						try {
 							int destinationPortId = 5554 * 2;
-							String messageToBeSent = Mode.JOIN_REQUEST.toString() + "$$" + myPortNumber + "$$" + "null";
+							String messageToBeSent = Mode.JOIN_REQUEST.toString() + "##" + myPortNumber + "##" + "null";
 
 							sendSocket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 									destinationPortId);
@@ -335,15 +410,16 @@ public class SimpleDhtProvider extends ContentProvider {
 				case SEND_JOIN_RESPONSE:
 					try {
 
+						/* Tell EVERYONE */
 						for (String hashedPortId : nodeInformation.keySet()) {
 
 							/* Which port are we sending the message on */
 							int portId = nodeInformation.get(hashedPortId);
 							String destinationPortId = String.valueOf(portId * 2);
 
-							/* Make the message to be sent ==> predecessorID %% successorID */
+							/* Make the message to be sent */
 							String sendMode = Mode.JOIN_RESPONSE.toString();
-							String messageToBeSent = sendMode + "$$" + myPortNumber + "$$" + getPredecessorAndSuccessor(hashedPortId);
+							String messageToBeSent = sendMode + "##" + myPortNumber + "##" + getPredecessorAndSuccessor(hashedPortId);
 
 							/* Send the message */
 							try {
@@ -372,6 +448,7 @@ public class SimpleDhtProvider extends ContentProvider {
 	/* ---------- UTIL methods and enums */
 
 	private String getPredecessorAndSuccessor(String hashedPortId) {
+		/* Return ==> predecessorID %% successorID */
 		String predecessorAndSuccessorHashedIDs;
 		String predecessorID = null, successorId;
 		Iterator<String> iterator = nodeInformation.keySet().iterator();
@@ -396,6 +473,16 @@ public class SimpleDhtProvider extends ContentProvider {
 		predecessorAndSuccessorHashedIDs = predecessorID + "%%" + successorId;
 
 		return predecessorAndSuccessorHashedIDs;
+	}
+
+	private void addRowToCursor(String key, MatrixCursor matrixCursor) {
+		String fileContent = readFromInternalStorage(key);
+		if (fileContent != null && fileContent.length() > 0) {
+			String[] columnValues = new String[2];
+			columnValues[0] = key;
+			columnValues[1] = fileContent;
+			matrixCursor.addRow(columnValues);
+		}
 	}
 
 	public enum Mode {
