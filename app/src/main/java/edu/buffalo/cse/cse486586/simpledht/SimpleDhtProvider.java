@@ -9,7 +9,6 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.telephony.TelephonyManager;
 import android.util.Log;
-
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -21,7 +20,6 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Formatter;
 import java.util.Iterator;
@@ -79,13 +77,14 @@ public class SimpleDhtProvider extends ContentProvider {
 		/* Get hashed ID */
 		myHashedId = genHash(String.valueOf(myPortNumber));
 
+		/* Declare self as predecessor and successor */
+		predecessorId = myPortNumber;
+		successorId = myPortNumber;
+
 		/* Tag - to be used for all debug/error logs */
 		TAG = "ANKIT" + myPortNumber;
 
 		if (myPortNumber == 5554) {
-			/* Declare self as predecessor and successor */
-			predecessorId = myPortNumber;
-			successorId = myPortNumber;
 
 			/* Put self in the nodeInformation map */
 			nodeInformation.put(myHashedId, myPortNumber);
@@ -154,6 +153,7 @@ public class SimpleDhtProvider extends ContentProvider {
 		/* Make the cursor */
 		String[] columnNames = {"key", "value"};
 		MatrixCursor matrixCursor = new MatrixCursor(columnNames);
+		Log.d(TAG, "[Query] " + "Query received. Selection ==> " + selection);
 
 		if (selection.equals("\"*\"")) {
 			/* TODO: Handle case for "*" */
@@ -181,13 +181,15 @@ public class SimpleDhtProvider extends ContentProvider {
 
 			if (belongsHere) {
 				/* The key-value pair is here. Read it into the cursor */
+				Log.d(TAG, "[Query] " + selection + " ==> belongs here. Reading.");
 				addRowToCursor(selection, matrixCursor);
 			} else {
+				Log.d(TAG, "[Query] " + selection + " ==> does not belong here.");
 				/* TODO: The value belongs somewhere else. Ask the successor if it has it */
 
 			}
 
-			Log.v(TAG, "Query for '" + selection + "'. No. of rows retrieved ==> " + matrixCursor.getCount());
+			Log.v(TAG, "[Query] No. of rows retrieved ==> " + matrixCursor.getCount());
 		}
 
 		return matrixCursor;
@@ -205,10 +207,11 @@ public class SimpleDhtProvider extends ContentProvider {
 
 		if (belongsHere) {
 			/* Since it belongs here, write the content values to internal storage */
+			Log.d(TAG, "[Insert] " + msgKey + " belongs here. Inserting.");
 			writeToInternalStorage(msgKey, msgValue);
 			keysInserted.add(msgKey);
 		} else {
-
+			Log.d(TAG, "[Insert] " + msgKey + " ==> does not belong here.");
 			/* TODO: Doesn't belong here. Pass it on until it reaches the right place. */
 		}
 
@@ -217,28 +220,32 @@ public class SimpleDhtProvider extends ContentProvider {
 
 	private boolean doesItBelongHere(String hashedKey) {
 	    /*
-	        TODO:
+	        TODO: Check if I missed out any case
 	          1. if key <= my-key
 	                a. if key is > predecessor
-	                    i. if my-key is < successor --> it belongs here
+	                    i. if my-key is < successor --> it belongs HERE
 	                    ii. else --> send to successor
 	                b. else --> send to successor
 	          2. else if key > me
-	                a. if my-key is < predecessor AND predecessor < msg-key --> it belongs here
+	                a. if my-key is < predecessor AND predecessor < msg-key --> it belongs HERE
 	                b. else --> send to successor
+	          3. else if I am my own successor and predecessor ---> it belongs HERE
 	     */
 
 		boolean belongsHere = false;
 		String predecessorHashedId = genHash(predecessorId);
 		String successorHashedId = genHash(successorId);
 
-		if (hashedKey.compareTo(myHashedId) <= 0) {
+		if (myHashedId.equals(predecessorHashedId) && myHashedId.equals(successorHashedId))
+			belongsHere = true;
+		else if (hashedKey.compareTo(myHashedId) <= 0) {
 			if (hashedKey.compareTo(predecessorHashedId) > 0)
 				if (myHashedId.compareTo(successorHashedId) < 0)
 					belongsHere = true;
 		} else if (myHashedId.compareTo(predecessorHashedId) < 0 && predecessorHashedId.compareTo(hashedKey) < 0)
 			belongsHere = true;
 
+		Log.d(TAG, "[belongsHere = " + belongsHere + "] hashedKey = " + hashedKey + ", predecessor = " + predecessorId + "(" + predecessorHashedId + "), successor = " + successorId + "(" + successorHashedId + ")");
 		return belongsHere;
 	}
 
@@ -397,7 +404,7 @@ public class SimpleDhtProvider extends ContentProvider {
 										successorId = myPortNumber;
 									}
 								}
-							}, 3000);
+							}, 500);
 						} finally {
 							if (sendSocket != null)
 								sendSocket.close();
