@@ -156,11 +156,26 @@ public class SimpleDhtProvider extends ContentProvider {
 		if (selection.equals("\"*\"")) {
 			/* TODO: Handle case for "*" */
 
-			/* FOR NOW: Return all key-value pairs on this local partition */
-			for (String key : keysInserted) {
-				addRowToCursor(key, matrixCursor);
+			/* The value belongs somewhere else. Ask the successor if it has it */
+			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, String.valueOf(Mode.QUERY_STAR_REQUEST), String.valueOf(myPortNumber), " ");
+
+			/* Wait until the query is answered */
+			isQueryAnswered = false;
+			while (!isQueryAnswered);
+
+			/* The "*" query has been answered by all. Store the results in the cursor and return them. */
+			/* Split up the key-value pairs in "resultOfMyQuery" */
+			String[] starResults = resultOfMyQuery.trim().split(",");
+			for (String starResult: starResults) {
+				/* starResult is made of key===value */
+				String[] keyValue = starResult.split("===");
+
+				/* Add row to the cursor with the key & value */
+				String[] columnValues = {keyValue[0], keyValue[1]};
+				matrixCursor.addRow(columnValues);
 			}
 
+			Log.v(TAG, "Query for '*' complete. No. of rows retrieved ==> " + matrixCursor.getCount());
 		} else if (selection.equals("\"@\"")) {
 		    /* TODO: Handle case for "@" */
 
@@ -169,7 +184,7 @@ public class SimpleDhtProvider extends ContentProvider {
 				addRowToCursor(key, matrixCursor);
 			}
 
-			Log.v(TAG, "Query for '@'. No. of rows retrieved ==> " + matrixCursor.getCount());
+			Log.v(TAG, "Query for '@' complete. No. of rows retrieved ==> " + matrixCursor.getCount());
 		} else {
 			/* ---- Normal key ("selection" is the key) */
 			String hashedKey = genHash(selection);
@@ -188,11 +203,11 @@ public class SimpleDhtProvider extends ContentProvider {
 
 				/* Wait until the query is answered */
 				isQueryAnswered = false;
-				while (!isQueryAnswered) {
-					/* Query has been answered. Store the results in cursor and return them. */
-					String[] columnValues = {selection, resultOfMyQuery};
-					matrixCursor.addRow(columnValues);
-				}
+				while (!isQueryAnswered);
+
+				/* Query has been answered. Store the results in cursor and return them. */
+				String[] columnValues = {selection, resultOfMyQuery};
+				matrixCursor.addRow(columnValues);
 			}
 
 			Log.v(TAG, "[Query] No. of rows retrieved ==> " + matrixCursor.getCount());
@@ -408,6 +423,34 @@ public class SimpleDhtProvider extends ContentProvider {
 							resultOfMyQuery = incoming[1];
 							isQueryAnswered = true;
 							break;
+
+						case QUERY_STAR_REQUEST:
+							originator = incoming[1];
+							String aggregatedResult = incoming[2];
+
+							/* Append all your key-value pairs to the result */
+							for (String key : keysInserted) {
+								String value = readFromInternalStorage(key);
+								aggregatedResult += key + "===" + value + ",";
+							}
+
+							if (originator.equals(String.valueOf(myPortNumber))) {
+								/* I am the originator. Stop here. */
+
+								/* Remove trailing comma */
+								if (!aggregatedResult.isEmpty() && aggregatedResult.charAt(aggregatedResult.length()-1) == ',')
+									aggregatedResult = aggregatedResult.substring(0, aggregatedResult.length()-1);
+
+								Log.d(TAG, "All '*' results received ==> " + aggregatedResult);
+								resultOfMyQuery = aggregatedResult;
+								isQueryAnswered = true;
+							} else {
+								/* TODO: Forward to successor */
+								Log.d(TAG, "Appended my stuff to the '*' query ==> " + aggregatedResult);
+								new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, String.valueOf(Mode.QUERY_STAR_REQUEST), originator, aggregatedResult);
+							}
+
+							break;
 					}
 				}
 			} catch (IOException e) {
@@ -480,10 +523,20 @@ public class SimpleDhtProvider extends ContentProvider {
 				case QUERY_RESULT_FOUND:
 					/* The key in the query was found here. Give it's value to the originator */
 					originator = (String) params[1];
-					String queryResult = (String) params[1];
+					String queryResult = (String) params[2];
 					messageToBeSent = Mode.QUERY_RESULT_FOUND.toString() + "##" + queryResult;
 
 					sendOnSocket(messageToBeSent, Integer.parseInt(originator) * 2);
+					break;
+
+				case QUERY_STAR_REQUEST:
+					/* Ask successor to add on ALL his key-value pairs and pass the joint */
+					originator = (String) params[1];
+					String aggregatedResult = (String) params[2];
+					messageToBeSent = Mode.QUERY_STAR_REQUEST.toString() + "##" + originator + "##" + aggregatedResult;
+
+					Log.d(TAG, "Forwarding '*' query to successor: " + successorId * 2);
+					sendOnSocket(messageToBeSent, successorId * 2);
 					break;
 			}
 
@@ -554,6 +607,6 @@ public class SimpleDhtProvider extends ContentProvider {
 	}
 
 	public enum Mode {
-		JOIN_REQUEST, JOIN_RESPONSE, SEND_JOIN_RESPONSE, SEND_JOIN_REQUEST, INSERT_REQUEST, QUERY_FIND_REQUEST, QUERY_RESULT_FOUND
+		JOIN_REQUEST, JOIN_RESPONSE, SEND_JOIN_RESPONSE, SEND_JOIN_REQUEST, INSERT_REQUEST, QUERY_FIND_REQUEST, QUERY_RESULT_FOUND, QUERY_STAR_REQUEST
 	}
 }
