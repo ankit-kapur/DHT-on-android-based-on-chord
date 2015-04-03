@@ -119,7 +119,6 @@ public class SimpleDhtProvider extends ContentProvider {
 		    /* Delete all files on the local partition */
 
 			for (String key : keysInserted)
-				/* TODO: Check if this works */
 				context.deleteFile(key);
 			keysInserted.clear();
 
@@ -165,14 +164,16 @@ public class SimpleDhtProvider extends ContentProvider {
 
 			/* The "*" query has been answered by all. Store the results in the cursor and return them. */
 			/* Split up the key-value pairs in "resultOfMyQuery" */
-			String[] starResults = resultOfMyQuery.trim().split(",");
-			for (String starResult: starResults) {
-				/* starResult is made of key===value */
-				String[] keyValue = starResult.split("===");
+			if (resultOfMyQuery.contains(",")) {
+				String[] starResults = resultOfMyQuery.trim().split(",");
+				for (String starResult : starResults) {
+					/* starResult is made of key===value */
+					String[] keyValue = starResult.split("===");
 
-				/* Add row to the cursor with the key & value */
-				String[] columnValues = {keyValue[0], keyValue[1]};
-				matrixCursor.addRow(columnValues);
+					/* Add row to the cursor with the key & value */
+					String[] columnValues = {keyValue[0], keyValue[1]};
+					matrixCursor.addRow(columnValues);
+				}
 			}
 
 			Log.v(TAG, "Query for '*' complete. No. of rows retrieved ==> " + matrixCursor.getCount());
