@@ -45,6 +45,8 @@ public class SimpleDhtProvider extends ContentProvider {
 	TreeMap<String, Integer> nodeInformation = new TreeMap<>();
 	static int predecessorId = 0, successorId = 0;
 	static boolean is5554Alive = false;
+	static boolean isQueryAnswered = false;
+	static String resultOfMyQuery = null;
 
 	List<String> keysInserted = new ArrayList<>();
 
@@ -162,7 +164,7 @@ public class SimpleDhtProvider extends ContentProvider {
 		} else if (selection.equals("\"@\"")) {
 		    /* TODO: Handle case for "@" */
 
-			/* FOR NOW: Return all key-value pairs on this local partition */
+			/* Return all key-value pairs on this local partition */
 			for (String key : keysInserted) {
 				addRowToCursor(key, matrixCursor);
 			}
@@ -180,9 +182,17 @@ public class SimpleDhtProvider extends ContentProvider {
 				Log.d(TAG, "[Query] " + selection + " ==> belongs here. Reading.");
 				addRowToCursor(selection, matrixCursor);
 			} else {
-				Log.d(TAG, "[Query] " + selection + " ==> does not belong here.");
-				/* TODO: The value belongs somewhere else. Ask the successor if it has it */
+				/* The value belongs somewhere else. Ask the successor if it has it */
+				Log.d(TAG, "[Query] " + selection + " ==> does not belong here. Asking successor => " + successorId);
+				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, String.valueOf(Mode.QUERY_FIND_REQUEST), String.valueOf(myPortNumber), selection);
 
+				/* Wait until the query is answered */
+				isQueryAnswered = false;
+				while (!isQueryAnswered) {
+					/* Query has been answered. Store the results in cursor and return them. */
+					String[] columnValues = {selection, resultOfMyQuery};
+					matrixCursor.addRow(columnValues);
+				}
 			}
 
 			Log.v(TAG, "[Query] No. of rows retrieved ==> " + matrixCursor.getCount());
@@ -217,22 +227,9 @@ public class SimpleDhtProvider extends ContentProvider {
 		return null;
 	}
 
-	private boolean doesItBelongHere(String msgKey) {
+	private boolean doesItBelongHere(String msgKeyHashed) {
 	    /*
-	        TODO: Check if I missed out any case
-	          1. if I am my own successor and predecessor ---> it belongs HERE
-	          2. else if msg-key <= my-key
-	                a. if msg-key is > predecessor  --> if msg-key is between the predecessor and me
-	                    i. if my-key is < successor --> it belongs HERE
-	                    ii. else --> send to successor
-	                b. else
-	                    i. if my-key is < predecessor --> it belongs HERE
-	                    ii. else --> send to successor
-	          3. else if key > me
-	                a. if my-key is < predecessor AND predecessor < msg-key --> it belongs HERE
-	                b. else --> send to successor
-
-	          NEW:
+	        Cases:
 	          1. if I am my own successor and predecessor ---> it belongs HERE
 	          2. if I'm the 1st in the ring
 	                a. if msg-key > predecessor OR msg-key < my-key ---> it belongs HERE
@@ -247,25 +244,14 @@ public class SimpleDhtProvider extends ContentProvider {
 			belongsHere = true;
 		else if (myHashedId.compareTo(predecessorHashedId) < 0) {
 			/* I'm the 1st in the ring */
-			if (msgKey.compareTo(predecessorHashedId) > 0 || msgKey.compareTo(myHashedId) < 0)
+			if (msgKeyHashed.compareTo(predecessorHashedId) > 0 || msgKeyHashed.compareTo(myHashedId) < 0)
 				/* The message key is larger than the largest key, OR smaller than the smallest */
 				belongsHere = true;
-		} else if (msgKey.compareTo(predecessorHashedId) > 0 && msgKey.compareTo(myHashedId) <= 0)
+		} else if (msgKeyHashed.compareTo(predecessorHashedId) > 0 && msgKeyHashed.compareTo(myHashedId) <= 0)
 			/* Normal case. The key is between my predecessor and me */
 			belongsHere = true;
 
-		//if (myHashedId.equals(predecessorHashedId) && myHashedId.equals(successorHashedId))
-		//	belongsHere = true;
-		//else if (msgKey.compareTo(myHashedId) <= 0) {
-		//	if (msgKey.compareTo(predecessorHashedId) > 0) {
-		//		if (myHashedId.compareTo(successorHashedId) < 0)
-		//			belongsHere = true;
-		//	} else if (myHashedId.compareTo(predecessorHashedId) < 0)
-		//		belongsHere = true;
-		//} else if (myHashedId.compareTo(predecessorHashedId) < 0 && predecessorHashedId.compareTo(msgKey) < 0)
-		//	belongsHere = true;
-
-		Log.d(TAG, "[belongsHere = " + belongsHere + "] hashedKey = " + msgKey + ", predecessor = " + predecessorId + "(" + predecessorHashedId + "), successor = " + successorId + "(" + successorHashedId + ")");
+		Log.d(TAG, "[belongsHere = " + belongsHere + "] hashedKey = " + msgKeyHashed + ", predecessor = " + predecessorId + "(" + predecessorHashedId + "), successor = " + successorId + "(" + successorHashedId + ")");
 		return belongsHere;
 	}
 
@@ -402,6 +388,26 @@ public class SimpleDhtProvider extends ContentProvider {
 							insert(uri, contentValues);
 
 							break;
+
+						case QUERY_FIND_REQUEST:
+							String originator = incoming[1];
+							String keyToFind = incoming[2];
+
+							if (doesItBelongHere(genHash(keyToFind))) {
+								/* The key is present here. Find it and inform the originator */
+								String queryResult = readFromInternalStorage(keyToFind);
+								new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, String.valueOf(Mode.QUERY_RESULT_FOUND), originator, queryResult);
+							} else {
+								/* Not here. Pass on to successor */
+								Log.d(TAG, "[Query] " + keyToFind + " ==> does not belong here. Passing on to successor => " + successorId);
+								new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, String.valueOf(Mode.QUERY_FIND_REQUEST), originator, keyToFind);
+							}
+							break;
+
+						case QUERY_RESULT_FOUND:
+							resultOfMyQuery = incoming[1];
+							isQueryAnswered = true;
+							break;
 					}
 				}
 			} catch (IOException e) {
@@ -419,114 +425,90 @@ public class SimpleDhtProvider extends ContentProvider {
 
 			String modeString = (String) params[0];
 			Mode mode = Mode.valueOf(modeString);
-			Socket sendSocket = null;
-
-			//if (myPortNumber != 5554) {
-			//	try {
-			//		Thread.sleep(5000);
-			//	} catch (InterruptedException e) {
-			//	}
-			//}
+			String messageToBeSent = null;
+			int destinationPortId;
 
 			switch (mode) {
 
 				case SEND_JOIN_REQUEST:
 					/* Send join request to 5554 */
-					try {
-						try {
-							int destinationPortId = 5554 * 2;
-							String messageToBeSent = Mode.JOIN_REQUEST.toString() + "##" + myPortNumber + "##" + "null";
-							Log.d(TAG, "Sending JOIN request to 5554 ==> " + messageToBeSent);
+					destinationPortId = 5554 * 2;
+					messageToBeSent = Mode.JOIN_REQUEST.toString() + "##" + myPortNumber + "##" + "null";
+					Log.d(TAG, "Sending JOIN request to 5554 ==> " + messageToBeSent);
 
-							sendSocket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-									destinationPortId);
-							PrintWriter printWriter = new PrintWriter(sendSocket.getOutputStream(), true);
-							printWriter.println(messageToBeSent + "\n");
-							printWriter.flush();
-							printWriter.close();
-							/* Wait, then check if 5554 replied */
-							/* TODO: Check if unnecessary */
-							//Timer timer = new Timer();
-							//timer.schedule(new TimerTask() {
-							//	public void run() {
-							//		if (!is5554Alive) {
-							//			Log.d(TAG, "5554 IS DEAD");
-							//			/* 5554 is DEAD. Declare self as predecessor and successor */
-							//			predecessorId = myPortNumber;
-							//			successorId = myPortNumber;
-							//		}
-							//	}
-							//}, 1000);
-						} finally {
-							if (sendSocket != null)
-								sendSocket.close();
-						}
-					} catch (IOException e) {
-						Log.e("ERROR " + TAG, Log.getStackTraceString(e));
-					}
+					sendOnSocket(messageToBeSent, destinationPortId);
+
 					break;
 
 				case SEND_JOIN_RESPONSE:
-					try {
-						/* Tell everyone about their neighbours */
-						for (String hashedPortId : nodeInformation.keySet()) {
+					/* Tell everyone about their neighbours */
+					for (String hashedPortId : nodeInformation.keySet()) {
 
-							/* Which port are we sending the message on */
-							int portId = nodeInformation.get(hashedPortId);
-							int destinationPortId = portId * 2;
+						/* Which port are we sending the message on */
+						int portId = nodeInformation.get(hashedPortId);
+						destinationPortId = portId * 2;
 
-							/* Make the message to be sent */
-							String sendMode = Mode.JOIN_RESPONSE.toString();
-							String messageToBeSent = sendMode + "##" + myPortNumber + "##" + getPredecessorAndSuccessor(hashedPortId);
+						/* Make the message to be sent */
+						String sendMode = Mode.JOIN_RESPONSE.toString();
+						messageToBeSent = sendMode + "##" + myPortNumber + "##" + getPredecessorAndSuccessor(hashedPortId);
 
-							Log.d(TAG, "Sending neighbour information to " + portId + " ==> " + messageToBeSent);
+						Log.d(TAG, "Sending neighbour information to " + portId + " ==> " + messageToBeSent);
 
-							/* Send the message */
-							try {
-								sendSocket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-										destinationPortId );
-								PrintWriter printWriter = new PrintWriter(sendSocket.getOutputStream(), true);
-								printWriter.println(messageToBeSent);
-							} finally {
-								if (sendSocket != null)
-									sendSocket.close();
-							}
-						}
-
-					} catch (IOException e) {
-						Log.e("ERROR " + TAG, Log.getStackTraceString(e));
+						/* Send the message */
+						sendOnSocket(messageToBeSent, destinationPortId);
 					}
+
 					break;
 
 				case INSERT_REQUEST:
-					try {
-						/* Construct message as ===> <mode> ## <key> ## <value> */
-						String msgKey = (String) params[1];
-						String msgValue = (String) params[2];
-						String messageToBeSent = Mode.INSERT_REQUEST.toString() + "##" + msgKey + "##" + msgValue;
+					/* Construct message as ===> <mode> ## <key> ## <value> */
+					String msgKey = (String) params[1];
+					String msgValue = (String) params[2];
+					messageToBeSent = Mode.INSERT_REQUEST.toString() + "##" + msgKey + "##" + msgValue;
 
-						/* Send to successor */
-						int destinationPortId = successorId * 2;
-						sendSocket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-								destinationPortId);
-						PrintWriter printWriter = new PrintWriter(sendSocket.getOutputStream(), true);
-						printWriter.println(messageToBeSent);
-					} catch (IOException e) {
-						Log.e("ERROR " + TAG, Log.getStackTraceString(e));
-					} finally {
-						if (sendSocket != null) {
-							try {
-								sendSocket.close();
-							} catch (IOException e) {
-								Log.e("ERROR " + TAG, Log.getStackTraceString(e));
-							}
+					sendOnSocket(messageToBeSent, successorId * 2);
+					break;
 
-						}
-					}
+				case QUERY_FIND_REQUEST:
+					String originator = (String) params[1];
+					String keyToFind = (String) params[2];
+					messageToBeSent = Mode.QUERY_FIND_REQUEST.toString() + "##" + originator + "##" + keyToFind;
+
+					sendOnSocket(messageToBeSent, successorId * 2);
+					break;
+
+				case QUERY_RESULT_FOUND:
+					/* The key in the query was found here. Give it's value to the originator */
+					originator = (String) params[1];
+					String queryResult = (String) params[1];
+					messageToBeSent = Mode.QUERY_RESULT_FOUND.toString() + "##" + queryResult;
+
+					sendOnSocket(messageToBeSent, Integer.parseInt(originator) * 2);
 					break;
 			}
 
 			return null;
+		}
+
+		/* Send to successor */
+		private void sendOnSocket(String messageToBeSent, int destinationPort) {
+			Socket sendSocket = null;
+			try {
+				sendSocket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+						destinationPort);
+				PrintWriter printWriter = new PrintWriter(sendSocket.getOutputStream(), true);
+				printWriter.println(messageToBeSent);
+			} catch (IOException e) {
+				Log.e("ERROR " + TAG, Log.getStackTraceString(e));
+			} finally {
+				if (sendSocket != null) {
+					try {
+						sendSocket.close();
+					} catch (IOException e) {
+						Log.e("ERROR " + TAG, Log.getStackTraceString(e));
+					}
+				}
+			}
 		}
 	}
 
@@ -572,6 +554,6 @@ public class SimpleDhtProvider extends ContentProvider {
 	}
 
 	public enum Mode {
-		JOIN_REQUEST, JOIN_RESPONSE, SEND_JOIN_RESPONSE, SEND_JOIN_REQUEST, INSERT_REQUEST
+		JOIN_REQUEST, JOIN_RESPONSE, SEND_JOIN_RESPONSE, SEND_JOIN_REQUEST, INSERT_REQUEST, QUERY_FIND_REQUEST, QUERY_RESULT_FOUND
 	}
 }
